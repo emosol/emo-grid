@@ -1,0 +1,515 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EMO Grid</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="styles.css">
+    <style>
+        :root {
+            --grid-size: 100%;
+            --min-scale: 50%;
+            --max-scale: 200%;
+        }
+        
+        .reset-button {
+            margin-top: 10px;
+            padding: 8px 16px;
+            background: linear-gradient(45deg, #ff4b4b, #ff7676);
+            border: none;
+            border-radius: 4px;
+            color: white;
+            cursor: pointer;
+            font-family: 'Press Start 2P', cursive;
+            font-size: 12px;
+            transition: all 0.3s ease;
+        }
+
+        .reset-button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(255, 75, 75, 0.3);
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>EMO Grid <a href="https://x.com/emosolfun" target="_blank" class="twitter-link"><svg class="twitter-icon" viewBox="0 0 24 24" fill="white"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"></path></svg></a></h1>
+        </div>
+        
+        <div class="wallet-section">
+            <button id="connectButton">Connect Phantom Wallet</button>
+            <div class="token-info">
+                <p>Wallet: <span id="walletAddress">Not connected</span></p>
+                <p>EMO Balance: <span id="tokenBalance">0</span></p>
+                <p>Available Squares: <span id="availableSquares">0</span></p>
+                <p>Minted EMOs: <span id="mintedCount">0</span></p>
+            </div>
+        </div>
+
+        <div class="grid-section">
+            <div class="grid-wrapper">
+                <div class="grid-container" id="gridContainer"></div>
+            </div>
+        </div>
+
+        <div class="scale-display">
+            <span id="scaleValue">100%</span>
+        </div>
+
+        <div class="loading" id="loading">Checking balance...</div>
+        <div class="tooltip" id="tooltip"></div>
+
+        <script src="https://unpkg.com/@solana/web3.js@latest/lib/index.iife.min.js"></script>
+        <script src="emoData.js"></script>
+        <script>
+            const GETBLOCK_ENDPOINT = 'https://go.getblock.io/4daa5c293ac74266b519ba3f80293bab';
+            const EMO_TOKEN_ADDRESS = 'Em9zr2tgSmGgRbz3kxyQeRXjRi9oc13wMu6cKam4zWFW';
+            const SQUARES_PER_TOKEN = 1;
+            const GRID_STATE_FILE = 'gridState.json';
+
+            let walletAddress = null;
+            let connection = null;
+            let gridState = {};  
+            let mintedEmos = new Set();
+            let currentScale = 1;
+            let isDragging = false;
+            let lastX = 0;
+            let lastY = 0;
+            let scrollLeft = 0;
+            let scrollTop = 0;
+
+            function updateScale(delta, event) {
+                const container = document.querySelector('.grid-container');
+                if (!container) return;
+
+                // If no event object, use container center as zoom point
+                const rect = container.getBoundingClientRect();
+                const mouseX = event ? event.clientX : rect.left + rect.width / 2;
+                const mouseY = event ? event.clientY : rect.top + rect.height / 2;
+
+                // Update scale level
+                currentScale = Math.max(0.5, Math.min(3, currentScale + delta * 0.1));
+
+                // Update scale display
+                document.getElementById('scaleValue').textContent = `${Math.round(currentScale * 100)}%`;
+
+                // Get current transform value
+                const currentTransform = container.style.transform || 'translate(-50%, -50%) scale(1)';
+                const newTransform = currentTransform.replace(/scale\([^)]*\)/, `scale(${currentScale})`);
+                container.style.transform = newTransform;
+            }
+
+            // Initialize with default scale
+            setTimeout(() => {
+                updateScale(0, null);
+            }, 100);
+
+            // Refresh grid state every 5 seconds
+            setInterval(loadGridState, 5000);
+
+            function checkBoundaries(container) {
+                const wrapper = container.parentElement;
+                const rect = container.getBoundingClientRect();
+                const wrapperRect = wrapper.getBoundingClientRect();
+                
+                if (rect.width < wrapperRect.width) {
+                    container.style.left = '0px';
+                } else {
+                    const maxX = rect.width - wrapperRect.width;
+                    const currentLeft = parseInt(container.style.left || '0');
+                    container.style.left = `${Math.max(Math.min(currentLeft, 0), -maxX)}px`;
+                }
+                
+                if (rect.height < wrapperRect.height) {
+                    container.style.top = '0px';
+                } else {
+                    const maxY = rect.height - wrapperRect.height;
+                    const currentTop = parseInt(container.style.top || '0');
+                    container.style.top = `${Math.max(Math.min(currentTop, 0), -maxY)}px`;
+                }
+            }
+
+            function handleWheel(e) {
+                e.preventDefault();
+                const delta = e.deltaY < 0 ? 5 : -5;
+                updateScale(delta, e);
+            }
+
+            function initDragHandlers() {
+                const container = document.querySelector('.grid-container');
+                const wrapper = document.querySelector('.grid-wrapper');
+                
+                container.addEventListener('mousedown', (e) => {
+                    // Only right-click for dragging
+                    if (e.button !== 2) return;
+                    
+                    isDragging = true;
+                    container.style.cursor = 'grabbing';
+                    lastX = e.pageX - container.offsetLeft;
+                    lastY = e.pageY - container.offsetTop;
+                    
+                    // Prevent default right-click menu
+                    e.preventDefault();
+                });
+                
+                container.addEventListener('mousemove', (e) => {
+                    if (!isDragging) return;
+                    
+                    e.preventDefault();
+                    const x = e.pageX - lastX;
+                    const y = e.pageY - lastY;
+                    
+                    container.style.left = `${x}px`;
+                    container.style.top = `${y}px`;
+                    checkBoundaries(container);
+                });
+                
+                container.addEventListener('mouseup', () => {
+                    isDragging = false;
+                    container.style.cursor = 'default';
+                });
+                
+                container.addEventListener('mouseleave', () => {
+                    isDragging = false;
+                    container.style.cursor = 'default';
+                });
+                
+                
+                container.addEventListener('contextmenu', (e) => {
+                    e.preventDefault();
+                });
+
+                // Listen for mouseup on entire document to prevent drag sticking
+                document.addEventListener('mouseup', () => {
+                    if (isDragging) {
+                        isDragging = false;
+                        container.style.cursor = 'default';
+                    }
+                });
+            }
+
+            function initZoomHandlers() {
+                const wrapper = document.querySelector('.grid-wrapper');
+                wrapper.addEventListener('wheel', handleWheel, { passive: false });
+            }
+
+            async function initializeSolana() {
+                connection = new solanaWeb3.Connection(GETBLOCK_ENDPOINT);
+            }
+
+            async function connectWallet() {
+                try {
+                    if (!window.solana || !window.solana.isPhantom) {
+                        alert('Please install Phantom wallet!');
+                        return;
+                    }
+
+                    const response = await window.solana.connect();
+                    walletAddress = response.publicKey.toString();
+                    document.getElementById('walletAddress').textContent = 
+                        walletAddress.slice(0, 4) + '...' + walletAddress.slice(-4);
+                    document.getElementById('connectButton').innerHTML = 'Connected';
+                    document.getElementById('connectButton').style.background = 
+                        'linear-gradient(45deg, var(--secondary-color), var(--accent-color))';
+                    
+                    await checkTokenBalance();
+                } catch (err) {
+                    console.error('Error connecting wallet:', err);
+                    alert('Failed to connect wallet');
+                }
+            }
+
+            async function checkTokenBalance() {
+                const loading = document.getElementById('loading');
+                loading.style.display = 'block';
+                
+                try {
+                    if (!walletAddress) return;
+
+                    const tokenAccount = await connection.getParsedTokenAccountsByOwner(
+                        new solanaWeb3.PublicKey(walletAddress),
+                        {
+                            mint: new solanaWeb3.PublicKey(EMO_TOKEN_ADDRESS)
+                        }
+                    );
+
+                    let balance = 0;
+                    if (tokenAccount.value.length > 0) {
+                        balance = tokenAccount.value[0].account.data.parsed.info.tokenAmount.uiAmount;
+                    }
+
+                    document.getElementById('tokenBalance').textContent = balance.toLocaleString();
+                    const availableSquares = Math.floor(balance / SQUARES_PER_TOKEN);
+                    document.getElementById('availableSquares').textContent = availableSquares;
+                    document.getElementById('mintedCount').textContent = mintedEmos.size;
+
+                    return balance;
+                } catch (err) {
+                    console.error('Error checking token balance:', err);
+                    return 0;
+                } finally {
+                    loading.style.display = 'none';
+                }
+            }
+
+            function createGrid() {
+                const gridWrapper = document.getElementById('gridContainer');
+                for (let i = 0; i < 10000; i++) {
+                    const cell = document.createElement('div');
+                    cell.className = 'cell';
+                    cell.dataset.index = i;
+                    cell.addEventListener('click', handleCellClick);
+                    cell.addEventListener('mouseover', handleCellHover);
+                    cell.addEventListener('mouseout', handleCellHoverOut);
+                    gridWrapper.appendChild(cell);
+                }
+            }
+
+            async function handleCellClick(event) {
+                // If clicking a link, let the event bubble
+                if (event.target.closest('.emoji-link')) {
+                    return;
+                }
+                
+                if (isDragging) return;
+                
+                const cell = event.target;
+                
+                // Check if cell is already lit
+                if (cell.classList.contains('lit')) {
+                    const index = parseInt(cell.dataset.index);
+                    const owner = gridState.litCells[index]?.owner || "another user";
+                    const explorerUrl = `https://solscan.io/account/${owner}`;
+                    window.open(explorerUrl, '_blank');
+                    return;
+                }
+
+                // Not connected wallet cannot light up new cells
+                if (!walletAddress) {
+                    alert('Please connect your wallet first to light up squares!');
+                    return;
+                }
+
+                const balance = await checkTokenBalance();
+                const availableSquares = Math.floor(balance);
+                
+                if (mintedEmos.size >= availableSquares) {
+                    alert(`Not enough tokens! You need 1 EMO token per square. Current balance: ${balance}`);
+                    return;
+                }
+
+                const index = parseInt(cell.dataset.index);
+                const emo = EMO_DATA[index];
+                
+                // Create link container
+                const linkContainer = document.createElement('a');
+                linkContainer.href = `https://solscan.io/account/${walletAddress}`;
+                linkContainer.target = '_blank';
+                linkContainer.className = 'emoji-link';
+                
+                const emojiContainer = document.createElement('div');
+                emojiContainer.className = 'emoji-container';
+                
+                const img = document.createElement('img');
+                img.src = emo.imageUrls[0];
+                img.alt = 'emoji';
+                img.className = 'emoji-image';
+                
+                emojiContainer.appendChild(img);
+                linkContainer.appendChild(emojiContainer);
+
+                cell.innerHTML = '';
+                cell.appendChild(linkContainer);
+                cell.classList.add('lit');
+                mintedEmos.add(index);
+                
+                // Save lit cell's user address
+                const newState = {
+                    litCells: {
+                        ...gridState.litCells,
+                        [index]: {
+                            imageUrl: emo.imageUrls[0],
+                            timestamp: new Date().toISOString(),
+                            owner: walletAddress
+                        }
+                    },
+                    lastUpdate: new Date().toISOString()
+                };
+                
+                try {
+                    const response = await fetch('/saveGridState', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify(newState)
+                    });
+
+                    if (!response.ok) {
+                        throw new Error('Failed to save grid state');
+                    }
+
+                    gridState = newState;
+                    document.getElementById('mintedCount').textContent = mintedEmos.size;
+                    
+                    cell.style.animation = 'none';
+                    cell.offsetHeight;
+                    cell.style.animation = 'lightUp 0.5s ease-out forwards';
+                } catch (error) {
+                    console.warn('Failed to save grid state:', error);
+                    // If save fails, rollback changes
+                    cell.innerHTML = '';
+                    cell.classList.remove('lit');
+                    mintedEmos.delete(index);
+                    alert('Failed to save your change. Please try again.');
+                }
+            }
+
+            function handleCellHover(event) {
+                if (isDragging) return;
+                const tooltip = document.getElementById('tooltip');
+                const cell = event.target;
+                const index = parseInt(cell.dataset.index);
+                const emo = EMO_DATA[index];
+                
+                let tooltipContent = `EMO #${emo.id}<br>Rarity: ${emo.rarity}`;
+                
+                // Display cell's owner information
+                if (cell.classList.contains('lit')) {
+                    const owner = gridState.litCells[index]?.owner || "Unknown";
+                    tooltipContent += `<br>Lit by: ${owner}`;
+                } else if (!walletAddress) {
+                    tooltipContent += '<br><small>Connect wallet to light up squares</small>';
+                }
+                
+                tooltip.style.left = `${event.clientX}px`;
+                tooltip.style.top = `${event.clientY - 40}px`;
+                tooltip.innerHTML = tooltipContent;
+                tooltip.style.opacity = '1';
+            }
+
+            function handleCellHoverOut() {
+                const tooltip = document.getElementById('tooltip');
+                tooltip.style.opacity = '0';
+            }
+
+            async function loadGridState() {
+                try {
+                    const response = await fetch('/gridState');
+                    if (response.ok) {
+                        const data = await response.json();
+                        
+                        // If empty object, no need to process
+                        if (Object.keys(data).length === 0) {
+                            gridState = data;
+                            return;
+                        }
+                        
+                        // Check for new changes
+                        const newCells = Object.keys(data.litCells || {}).filter(index => 
+                            !gridState.litCells?.[index] || 
+                            gridState.litCells[index].timestamp !== data.litCells[index].timestamp
+                        );
+
+                        // Only update changed cells
+                        newCells.forEach(index => {
+                            const cell = document.querySelector(`.cell[data-index="${index}"]`);
+                            if (cell && !cell.classList.contains('lit')) {
+                                const emoData = data.litCells[index];
+                                
+                                // Create link container
+                                const linkContainer = document.createElement('a');
+                                if (emoData.owner) {
+                                    linkContainer.href = `https://solscan.io/account/${emoData.owner}`;
+                                    linkContainer.target = '_blank';
+                                }
+                                linkContainer.className = 'emoji-link';
+                                
+                                const emojiContainer = document.createElement('div');
+                                emojiContainer.className = 'emoji-container';
+                                
+                                const img = document.createElement('img');
+                                img.src = emoData.imageUrl;
+                                img.alt = 'emoji';
+                                img.className = 'emoji-image';
+                                
+                                emojiContainer.appendChild(img);
+                                linkContainer.appendChild(emojiContainer);
+                                
+                                cell.innerHTML = '';
+                                cell.appendChild(linkContainer);
+                                cell.classList.add('lit');
+                                mintedEmos.add(parseInt(index));
+                            }
+                        });
+
+                        gridState = data;
+                        document.getElementById('mintedCount').textContent = mintedEmos.size;
+                    }
+                } catch (error) {
+                    console.warn('Failed to load grid state:', error);
+                }
+            }
+
+            async function saveGridState() {
+                // If gridState is empty object, do not add any data
+                if (Object.keys(gridState).length === 0) {
+                    return;
+                }
+
+                const newState = {
+                    litCells: {},
+                    lastUpdate: new Date().toISOString()
+                };
+
+                mintedEmos.forEach(index => {
+                    const cell = document.querySelector(`.cell[data-index="${index}"]`);
+                    if (cell) {
+                        const img = cell.querySelector('.emoji-image');
+                        if (img) {
+                            newState.litCells[index] = {
+                                imageUrl: img.src,
+                                timestamp: new Date().toISOString(),
+                                owner: walletAddress
+                            };
+                        }
+                    }
+                });
+
+                try {
+                    const response = await fetch('/saveGridState', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify(newState)
+                    });
+
+                    if (!response.ok) {
+                        throw new Error('Failed to save grid state');
+                    }
+
+                    gridState = newState;
+                } catch (error) {
+                    console.warn('Failed to save grid state:', error);
+                }
+            }
+
+            document.getElementById('connectButton').addEventListener('click', connectWallet);
+            initializeSolana();
+            createGrid();
+            initDragHandlers();
+            initZoomHandlers();
+            loadGridState();
+
+            setInterval(checkTokenBalance, 30000);
+            setInterval(loadGridState, 1000);  // Check for updates every second
+            setInterval(saveGridState, 5000);  // Save state every 5 seconds
+        </script>
+    </div>
+</body>
+</html>
